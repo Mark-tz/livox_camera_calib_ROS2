@@ -5,6 +5,8 @@
 #include <iomanip>
 #include <iostream>
 #include <opencv2/core/eigen.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 using namespace std;
 
@@ -191,19 +193,28 @@ void roughCalib(std::vector<Calibration> &calibs, Vector6d &calib_params,
 }
 
 int main(int argc, char **argv) {
-  ros::init(argc, argv, "lidarCamCalib");
-  ros::NodeHandle nh;
-  ros::Rate loop_rate(0.1);
+  rclcpp::init(argc, argv);
+  auto node = rclcpp::Node::make_shared("lidarCamCalib");
+  
+  // 声明参数
+  node->declare_parameter("common.image_path", "");
+  node->declare_parameter("common.pcd_path", "");
+  node->declare_parameter("common.result_path", "");
+  node->declare_parameter("common.data_num", 1);
+  node->declare_parameter("camera.camera_matrix", std::vector<double>());
+  node->declare_parameter("camera.dist_coeffs", std::vector<double>());
+  node->declare_parameter("calib.use_rough_calib", false);
+  node->declare_parameter("calib.calib_config_file", "");
 
-  nh.param<string>("common/image_path", image_path, "");
-  nh.param<string>("common/pcd_path", pcd_path, "");
-  nh.param<string>("common/result_path", result_path, "");
-  nh.param<int>("common/data_num", data_num, 1);
-  nh.param<vector<double>>("camera/camera_matrix", camera_matrix,
-                           vector<double>());
-  nh.param<vector<double>>("camera/dist_coeffs", dist_coeffs, vector<double>());
-  nh.param<bool>("calib/use_rough_calib", use_rough_calib, false);
-  nh.param<string>("calib/calib_config_file", calib_config_file, "");
+  // 获取参数
+  image_path = node->get_parameter("common.image_path").as_string();
+  pcd_path = node->get_parameter("common.pcd_path").as_string();
+  result_path = node->get_parameter("common.result_path").as_string();
+  data_num = node->get_parameter("common.data_num").as_int();
+  camera_matrix = node->get_parameter("camera.camera_matrix").as_double_array();
+  dist_coeffs = node->get_parameter("camera.dist_coeffs").as_double_array();
+  use_rough_calib = node->get_parameter("calib.use_rough_calib").as_bool();
+  calib_config_file = node->get_parameter("calib.calib_config_file").as_string();
 
   std::vector<Calibration> calibs;
   for (size_t i = 0; i < data_num; i++) {
@@ -234,7 +245,7 @@ int main(int argc, char **argv) {
   std::vector<PnPData> pnp_list;
   std::vector<VPnPData> vpnp_list;
 
-  ROS_INFO_STREAM("Finish prepare!");
+  RCLCPP_INFO(node->get_logger(), "Finish prepare!");
   Eigen::Matrix3d R;
   Eigen::Vector3d T;
   inner << calibs[0].fx_, 0.0, calibs[0].cx_, 0.0, calibs[0].fy_, calibs[0].cy_,
@@ -363,7 +374,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  ros::Rate loop(0.5);
+  // ros::Rate loop(0.5);
   // roughCalib(calibra, calib_params, DEG2RAD(0.01), 20);
 
   R = Eigen::AngleAxisd(calib_params[0], Eigen::Vector3d::UnitZ()) *
@@ -388,18 +399,22 @@ int main(int argc, char **argv) {
   // ","
   //         << RAD2DEG(adjust_euler[2]) << "," << 0 << "," << 0 << "," << 0
   //         << std::endl;
-  while (ros::ok()) {
-    sensor_msgs::PointCloud2 pub_cloud;
+  while (rclcpp::ok()) {
+    sensor_msgs::msg::PointCloud2 pub_cloud;
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr rgb_cloud(
         new pcl::PointCloud<pcl::PointXYZRGB>);
     calibs[0].colorCloud(calib_params, 5, calibs[0].image_,
                          calibs[0].raw_lidar_cloud_, rgb_cloud);
     pcl::toROSMsg(*rgb_cloud, pub_cloud);
     pub_cloud.header.frame_id = "livox";
-    calibs[0].rgb_cloud_pub_.publish(pub_cloud);
+    calibs[0].rgb_cloud_pub_->publish(pub_cloud);
     std::cout << "push enter to publish again" << std::endl;
     getchar();
-    /* code */
+    
+    // 处理ROS2回调
+    rclcpp::spin_some(node);
   }
+  
+  rclcpp::shutdown();
   return 0;
 }

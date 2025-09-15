@@ -5,6 +5,12 @@
 #include <iomanip>
 #include <iostream>
 #include <opencv2/core/eigen.hpp>
+#include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/point_cloud2.hpp"
+#include "sensor_msgs/msg/image.hpp"
+#include "std_msgs/msg/header.hpp"
+#include "cv_bridge/cv_bridge.h"
+#include "pcl_conversions/pcl_conversions.h"
 
 using namespace std;
 
@@ -118,9 +124,6 @@ public:
       R.coeffRef(0, 0) = residuals[0];
       R.coeffRef(1, 0) = residuals[1];
       R = V * R;
-      // Eigen::Matrix<T, 2, 2> R = Eigen::Matrix<float, 2,
-      // 2>::Zero().cast<T>(); R.coeffRef(0, 0) = residuals[0];
-      // R.coeffRef(1, 1) = residuals[1]; R = V * R * V.transpose();
       residuals[0] = R.coeffRef(0, 0);
       residuals[1] = R.coeffRef(1, 0);
     }
@@ -145,7 +148,6 @@ void roughCalib(Calibration &calibra, Vector6d &calib_params,
       rot = Eigen::AngleAxisd(calib_params[0], Eigen::Vector3d::UnitZ()) *
             Eigen::AngleAxisd(calib_params[1], Eigen::Vector3d::UnitY()) *
             Eigen::AngleAxisd(calib_params[2], Eigen::Vector3d::UnitX());
-      // std::cout << "init rot" << rot << std::endl;
       float min_cost = 1000;
       for (int iter = 0; iter < max_iter; iter++) {
         Eigen::Vector3d adjust_euler = fix_adjust_euler;
@@ -157,10 +159,7 @@ void roughCalib(Calibration &calibra, Vector6d &calib_params,
             Eigen::AngleAxisd(adjust_euler[1], Eigen::Vector3d::UnitY()) *
             Eigen::AngleAxisd(adjust_euler[2], Eigen::Vector3d::UnitX());
         Eigen::Matrix3d test_rot = rot * adjust_rotation_matrix;
-        // std::cout << "adjust_rotation_matrix " << adjust_rotation_matrix
-        //           << std::endl;
         Eigen::Vector3d test_euler = test_rot.eulerAngles(2, 1, 0);
-        // std::cout << "test euler: " << test_euler << std::endl;
         Vector6d test_params;
         test_params << test_euler[0], test_euler[1], test_euler[2],
             calib_params[3], calib_params[4], calib_params[5];
@@ -189,21 +188,29 @@ void roughCalib(Calibration &calibra, Vector6d &calib_params,
 }
 
 int main(int argc, char **argv) {
-  ros::init(argc, argv, "lidarCamCalib");
-  ros::NodeHandle nh;
-  ros::Rate loop_rate(0.1);
-
-  nh.param<string>("common/image_file", image_file, "");
-  nh.param<string>("common/pcd_file", pcd_file, "");
-  nh.param<string>("common/result_file", result_file, "");
+  rclcpp::init(argc, argv);
+  auto node = rclcpp::Node::make_shared("lidarCamCalib");
+  
+  // 获取参数
+  node->declare_parameter("common.image_file", "");
+  node->declare_parameter("common.pcd_file", "");
+  node->declare_parameter("common.result_file", "");
+  node->declare_parameter("camera.camera_matrix", std::vector<double>());
+  node->declare_parameter("camera.dist_coeffs", std::vector<double>());
+  node->declare_parameter("calib.use_rough_calib", false);
+  node->declare_parameter("calib.calib_config_file", "");
+  
+  image_file = node->get_parameter("common.image_file").as_string();
+  pcd_file = node->get_parameter("common.pcd_file").as_string();
+  result_file = node->get_parameter("common.result_file").as_string();
   std::cout << "pcd_file path:" << pcd_file << std::endl;
-  nh.param<vector<double>>("camera/camera_matrix", camera_matrix,
-                           vector<double>());
-  nh.param<vector<double>>("camera/dist_coeffs", dist_coeffs, vector<double>());
-  nh.param<bool>("calib/use_rough_calib", use_rough_calib, false);
-  nh.param<string>("calib/calib_config_file", calib_config_file, "");
+  camera_matrix = node->get_parameter("camera.camera_matrix").as_double_array();
+  dist_coeffs = node->get_parameter("camera.dist_coeffs").as_double_array();
+  use_rough_calib = node->get_parameter("calib.use_rough_calib").as_bool();
+  calib_config_file = node->get_parameter("calib.calib_config_file").as_string();
 
   Calibration calibra(image_file, pcd_file, calib_config_file);
+  calibra.node_ = node;
   calibra.fx_ = camera_matrix[0];
   calibra.cx_ = camera_matrix[2];
   calibra.fy_ = camera_matrix[4];
@@ -224,7 +231,7 @@ int main(int argc, char **argv) {
   std::vector<PnPData> pnp_list;
   std::vector<VPnPData> vpnp_list;
 
-  ROS_INFO_STREAM("Finish prepare!");
+  RCLCPP_INFO_STREAM(node->get_logger(), "Finish prepare!");
   Eigen::Matrix3d R;
   Eigen::Vector3d T;
   inner << calibra.fx_, 0.0, calibra.cx_, 0.0, calibra.fy_, calibra.cy_, 0.0,
@@ -244,14 +251,14 @@ int main(int argc, char **argv) {
   calib_params[3] = T[0];
   calib_params[4] = T[1];
   calib_params[5] = T[2];
-  sensor_msgs::PointCloud2 pub_cloud;
+  sensor_msgs::msg::PointCloud2 pub_cloud;
   pcl::PointCloud<pcl::PointXYZRGB>::Ptr rgb_cloud(
       new pcl::PointCloud<pcl::PointXYZRGB>);
   calibra.colorCloud(calib_params, 5, calibra.image_, calibra.raw_lidar_cloud_,
                      rgb_cloud);
   pcl::toROSMsg(*rgb_cloud, pub_cloud);
   pub_cloud.header.frame_id = "livox";
-  calibra.init_rgb_cloud_pub_.publish(pub_cloud);
+  calibra.init_rgb_cloud_pub_->publish(pub_cloud);
   cv::Mat init_img = calibra.getProjectionImg(calib_params);
   cv::imshow("Initial extrinsic", init_img);
   cv::imwrite("/home/ycj/data/calib/init.png", init_img);
@@ -338,8 +345,6 @@ int main(int argc, char **argv) {
       std::cout << summary.BriefReport() << std::endl;
       Eigen::Matrix3d rot = m_q.toRotationMatrix();
       euler_angle = rot.eulerAngles(2, 1, 0);
-      // std::cout << rot << std::endl;
-      // std::cout << m_t << std::endl;
       calib_params[0] = euler_angle[0];
       calib_params[1] = euler_angle[1];
       calib_params[2] = euler_angle[2];
@@ -353,22 +358,18 @@ int main(int argc, char **argv) {
       Eigen::Quaterniond opt_q(R);
       std::cout << "q_dis:" << RAD2DEG(opt_q.angularDistance(q))
                 << " ,t_dis:" << (T - ori_t).norm() << std::endl;
-      // getchar();
-      // if (opt_q.angularDistance(q) < DEG2RAD(0.01) &&
-      //     (T - ori_t).norm() < 0.005) {
-      //   opt_flag = false;
-      // }
-      // if (!opt_flag) {
-      //   break;
-      // }
     }
     if (!opt_flag) {
       break;
     }
   }
 
-  ros::Rate loop(0.5);
-  // roughCalib(calibra, calib_params, DEG2RAD(0.01), 20);
+  // 创建定时器替代 rclcpp::Rate
+  auto timer_callback = [&]() {
+    // 这里可以添加定期执行的代码
+  };
+  auto timer = node->create_wall_timer(
+      std::chrono::milliseconds(2000), timer_callback);
 
   R = Eigen::AngleAxisd(calib_params[0], Eigen::Vector3d::UnitZ()) *
       Eigen::AngleAxisd(calib_params[1], Eigen::Vector3d::UnitY()) *
@@ -388,26 +389,24 @@ int main(int argc, char **argv) {
   Eigen::Matrix3d adjust_rotation;
   adjust_rotation = init_rotation.inverse() * R;
   Eigen::Vector3d adjust_euler = adjust_rotation.eulerAngles(2, 1, 0);
-  // outfile << RAD2DEG(adjust_euler[0]) << "," << RAD2DEG(adjust_euler[1]) <<
-  // ","
-  //         << RAD2DEG(adjust_euler[2]) << "," << 0 << "," << 0 << "," << 0
-  //         << std::endl;
-  while (ros::ok()) {
-    sensor_msgs::PointCloud2 pub_cloud;
+  
+  while (rclcpp::ok()) {
+    sensor_msgs::msg::PointCloud2 pub_cloud;
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr rgb_cloud(
         new pcl::PointCloud<pcl::PointXYZRGB>);
     calibra.colorCloud(calib_params, 5, calibra.image_,
                        calibra.raw_lidar_cloud_, rgb_cloud);
     pcl::toROSMsg(*rgb_cloud, pub_cloud);
     pub_cloud.header.frame_id = "livox";
-    calibra.rgb_cloud_pub_.publish(pub_cloud);
-    sensor_msgs::ImagePtr img_msg =
-        cv_bridge::CvImage(std_msgs::Header(), "bgr8", calibra.image_)
+    calibra.rgb_cloud_pub_->publish(pub_cloud);
+    sensor_msgs::msg::Image::SharedPtr img_msg =
+        cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", calibra.image_)
             .toImageMsg();
-    calibra.image_pub_.publish(img_msg);
+    calibra.image_pub_->publish(*img_msg);
     std::cout << "push enter to publish again" << std::endl;
     getchar();
-    /* code */
+    rclcpp::spin_some(node);
   }
+  rclcpp::shutdown();
   return 0;
 }

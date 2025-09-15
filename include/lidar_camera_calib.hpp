@@ -1,9 +1,10 @@
 #ifndef LIDAR_CAMERA_CALIB_HPP
 #define LIDAR_CAMERA_CALIB_HPP
 
-#include "CustomMsg.h"
+#include "livox_ros_driver/msg/custom_msg.hpp"
 #include "common.h"
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include <cv_bridge/cv_bridge.h>
 #include <fstream>
 #include <iostream>
@@ -21,11 +22,13 @@
 #include <pcl/search/kdtree.h>
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl_conversions/pcl_conversions.h>
-#include <ros/ros.h>
-#include <rosbag/bag.h>
-#include <rosbag/view.h>
+#include <rclcpp/rclcpp.hpp>
+#include <rosbag2_cpp/readers/sequential_reader.hpp>
+#include <rosbag2_cpp/storage_options.hpp>
+#include <rosbag2_cpp/converter_options.hpp>
+#include <rclcpp/serialization.hpp>
 #include <sstream>
-#include <std_msgs/Header.h>
+#include <std_msgs/msg/header.hpp>
 #include <stdio.h>
 #include <string>
 #include <time.h>
@@ -35,17 +38,12 @@
 #define online
 class Calibration {
 public:
-  ros::NodeHandle nh_;
-  ros::Publisher rgb_cloud_pub_ =
-      nh_.advertise<sensor_msgs::PointCloud2>("rgb_cloud", 1);
-  ros::Publisher init_rgb_cloud_pub_ =
-      nh_.advertise<sensor_msgs::PointCloud2>("init_rgb_cloud", 1);
-  ros::Publisher planner_cloud_pub_ =
-      nh_.advertise<sensor_msgs::PointCloud2>("planner_cloud", 1);
-  ros::Publisher line_cloud_pub_ =
-      nh_.advertise<sensor_msgs::PointCloud2>("line_cloud", 1);
-  ros::Publisher image_pub_ =
-      nh_.advertise<sensor_msgs::Image>("camera_image", 1);
+  std::shared_ptr<rclcpp::Node> node_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr rgb_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr init_rgb_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr planner_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr line_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
   enum ProjectionType { DEPTH, INTENSITY, BOTH };
   enum Direction { UP, DOWN, LEFT, RIGHT };
   std::string lidar_topic_name_ = "";
@@ -164,16 +162,23 @@ Calibration::Calibration(const std::string &image_file,
                          const std::string &pcd_file,
                          const std::string &calib_config_file) {
 
+  node_ = rclcpp::Node::make_shared("calibration_node");
+  rgb_cloud_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("rgb_cloud", 1);
+  init_rgb_cloud_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("init_rgb_cloud", 1);
+  planner_cloud_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("planner_cloud", 1);
+  line_cloud_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("line_cloud", 1);
+  image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>("camera_image", 1);
+
   loadCalibConfig(calib_config_file);
 
   image_ = cv::imread(image_file, cv::IMREAD_UNCHANGED);
   if (!image_.data) {
     std::string msg = "Can not load image from " + image_file;
-    ROS_ERROR_STREAM(msg.c_str());
+    RCLCPP_ERROR(node_->get_logger(), "%s", msg.c_str());
     exit(-1);
   } else {
     std::string msg = "Sucessfully load image!";
-    ROS_INFO_STREAM(msg.c_str());
+    RCLCPP_INFO(node_->get_logger(), "%s", msg.c_str());
   }
   width_ = image_.cols;
   height_ = image_.rows;
@@ -184,7 +189,7 @@ Calibration::Calibration(const std::string &image_file,
     cv::cvtColor(image_, grey_image_, cv::COLOR_BGR2GRAY);
   } else {
     std::string msg = "Unsupported image type, please use CV_8UC3 or CV_8UC1";
-    ROS_ERROR_STREAM(msg.c_str());
+    RCLCPP_ERROR(node_->get_logger(), "%s", msg.c_str());
     exit(-1);
   }
   cv::Mat edge_image;
@@ -193,19 +198,19 @@ Calibration::Calibration(const std::string &image_file,
                rgb_egde_cloud_);
   std::string msg = "Sucessfully extract edge from image, edge size:" +
                     std::to_string(rgb_egde_cloud_->size());
-  ROS_INFO_STREAM(msg.c_str());
+  RCLCPP_INFO(node_->get_logger(), "%s", msg.c_str());
 
   raw_lidar_cloud_ =
       pcl::PointCloud<pcl::PointXYZI>::Ptr(new pcl::PointCloud<pcl::PointXYZI>);
-  ROS_INFO_STREAM("Loading point cloud from pcd file.");
+  RCLCPP_INFO(node_->get_logger(), "Loading point cloud from pcd file.");
   if (!pcl::io::loadPCDFile(pcd_file, *raw_lidar_cloud_)) {
     // down_sampling_voxel(*raw_lidar_cloud_, 0.02);
     std::string msg = "Sucessfully load pcd, pointcloud size: " +
                       std::to_string(raw_lidar_cloud_->size());
-    ROS_INFO_STREAM(msg.c_str());
+    RCLCPP_INFO(node_->get_logger(), "%s", msg.c_str());
   } else {
     std::string msg = "Unable to load " + pcd_file;
-    ROS_ERROR_STREAM(msg.c_str());
+    RCLCPP_ERROR(node_->get_logger(), "%s", msg.c_str());
     exit(-1);
   }
 
@@ -250,7 +255,7 @@ bool Calibration::loadCalibConfig(const std::string &config_file) {
               << std::endl;
     exit(-1);
   } else {
-    ROS_INFO("Sucessfully load calib config file");
+    RCLCPP_INFO(node_->get_logger(), "Sucessfully load calib config file");
   }
   fSettings["ExtrinsicMat"] >> init_extrinsic_;
   init_rotation_matrix_ << init_extrinsic_.at<double>(0, 0),
@@ -633,7 +638,7 @@ bool Calibration::checkFov(const cv::Point2d &p) {
 void Calibration::initVoxel(
     const pcl::PointCloud<pcl::PointXYZI>::Ptr &input_cloud,
     const float voxel_size, std::unordered_map<VOXEL_LOC, Voxel *> &voxel_map) {
-  ROS_INFO_STREAM("Building Voxel");
+  RCLCPP_INFO(node_->get_logger(), "Building Voxel");
   // for voxel test
   srand((unsigned)time(NULL));
   pcl::PointCloud<pcl::PointXYZRGB> test_cloud;
@@ -672,10 +677,10 @@ void Calibration::initVoxel(
       voxel_map[position]->voxel_color << r, g, b;
     }
   }
-  // sensor_msgs::PointCloud2 pub_cloud;
+  // sensor_msgs::msg::PointCloud2 pub_cloud;
   // pcl::toROSMsg(test_cloud, pub_cloud);
   // pub_cloud.header.frame_id = "livox";
-  // rgb_cloud_pub_.publish(pub_cloud);
+  // rgb_cloud_pub_->publish(pub_cloud);
   for (auto iter = voxel_map.begin(); iter != voxel_map.end(); iter++) {
     if (iter->second->cloud->size() > 20) {
       down_sampling_voxel(*(iter->second->cloud), 0.02);
@@ -687,8 +692,8 @@ void Calibration::LiDAREdgeExtraction(
     const std::unordered_map<VOXEL_LOC, Voxel *> &voxel_map,
     const float ransac_dis_thre, const int plane_size_threshold,
     pcl::PointCloud<pcl::PointXYZI>::Ptr &lidar_line_cloud_3d) {
-  ROS_INFO_STREAM("Extracting Lidar Edge");
-  ros::Rate loop(5000);
+  RCLCPP_INFO(node_->get_logger(), "Extracting Lidar Edge");
+  rclcpp::Rate loop(5000);
   lidar_line_cloud_3d =
       pcl::PointCloud<pcl::PointXYZI>::Ptr(new pcl::PointCloud<pcl::PointXYZI>);
   for (auto iter = voxel_map.begin(); iter != voxel_map.end(); iter++) {
@@ -727,7 +732,7 @@ void Calibration::LiDAREdgeExtraction(
         //分割点云
         seg.segment(*inliers, *coefficients);
         if (inliers->indices.size() == 0) {
-          ROS_INFO_STREAM(
+          RCLCPP_INFO(node_->get_logger(),
               "Could not estimate a planner model for the given dataset");
           break;
         }
@@ -774,10 +779,10 @@ void Calibration::LiDAREdgeExtraction(
         *cloud_filter = cloud_f;
       }
       if (plane_list.size() >= 2) {
-        sensor_msgs::PointCloud2 planner_cloud2;
+        sensor_msgs::msg::PointCloud2 planner_cloud2;
         pcl::toROSMsg(color_planner_cloud, planner_cloud2);
         planner_cloud2.header.frame_id = "livox";
-        planner_cloud_pub_.publish(planner_cloud2);
+        planner_cloud_pub_->publish(planner_cloud2);
         loop.sleep();
       }
 
@@ -792,10 +797,10 @@ void Calibration::LiDAREdgeExtraction(
           for (size_t i = 0; i < line_cloud_list[cloud_index].size(); i++) {
             pcl::PointXYZI p = line_cloud_list[cloud_index].points[i];
             plane_line_cloud_->points.push_back(p);
-            sensor_msgs::PointCloud2 pub_cloud;
+            sensor_msgs::msg::PointCloud2 pub_cloud;
             pcl::toROSMsg(line_cloud_list[cloud_index], pub_cloud);
             pub_cloud.header.frame_id = "livox";
-            line_cloud_pub_.publish(pub_cloud);
+            line_cloud_pub_->publish(pub_cloud);
             loop.sleep();
             plane_line_number_.push_back(line_number_);
           }
@@ -1330,67 +1335,78 @@ void Calibration::loadImgAndPointcloud(
     cout << "File " << path << " does not exit" << endl;
     return;
   }
-  ROS_INFO("Loading the rosbag %s", path.c_str());
-  rosbag::Bag bag;
+  RCLCPP_INFO(node_->get_logger(), "Loading the rosbag %s", path.c_str());
+  
+  rosbag2_cpp::readers::SequentialReader reader;
+  rosbag2_storage::StorageOptions storage_options;
+  storage_options.uri = path;
+  storage_options.storage_id = "sqlite3";
+  
+  rosbag2_cpp::ConverterOptions converter_options;
+  converter_options.input_serialization_format = "cdr";
+  converter_options.output_serialization_format = "cdr";
+  
   try {
-    bag.open(path, rosbag::bagmode::Read);
-  } catch (rosbag::BagException e) {
-    ROS_ERROR_STREAM("LOADING BAG FAILED: " << e.what());
+    reader.open(storage_options, converter_options);
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(node_->get_logger(), "LOADING BAG FAILED: %s", e.what());
     return;
   }
 
-  std::vector<string> lidar_topic;
-  lidar_topic.push_back(lidar_topic_name_);
-  rosbag::View view(bag, rosbag::TopicQuery(lidar_topic));
-
   int cloudCount = 0;
-  for (const rosbag::MessageInstance &m : view) {
-    if (is_use_custom_msg_) {
-      livox_ros_driver::CustomMsg livox_cloud_msg =
-          *(m.instantiate<livox_ros_driver::CustomMsg>()); // message type
-
-      for (uint i = 0; i < livox_cloud_msg.point_num; ++i) {
-        pcl::PointXYZI p;
-        p.x = livox_cloud_msg.points[i].x;
-        p.y = livox_cloud_msg.points[i].y;
-        p.z = livox_cloud_msg.points[i].z;
-        p.intensity = livox_cloud_msg.points[i].reflectivity;
-        origin_cloud->points.push_back(p);
+  while (reader.has_next()) {
+    auto bag_message = reader.read_next();
+    
+    if (bag_message->topic_name == lidar_topic_name_) {
+      if (is_use_custom_msg_) {
+        rclcpp::Serialization<livox_ros_driver::msg::CustomMsg> serialization;
+        livox_ros_driver::msg::CustomMsg livox_cloud;
+        rclcpp::SerializedMessage serialized_msg(*bag_message->serialized_data);
+        serialization.deserialize_message(&serialized_msg, &livox_cloud);
+        
+        pcl::PointCloud<pcl::PointXYZI> cloud;
+        for (uint i = 0; i < livox_cloud.point_num; ++i) {
+          pcl::PointXYZI point;
+          point.x = livox_cloud.points[i].x;
+          point.y = livox_cloud.points[i].y;
+          point.z = livox_cloud.points[i].z;
+          point.intensity = livox_cloud.points[i].reflectivity;
+          cloud.points.push_back(point);
+        }
+        for (uint i = 0; i < cloud.size(); ++i) {
+          origin_cloud->points.push_back(cloud.points[i]);
+        }
+      } else {
+        rclcpp::Serialization<sensor_msgs::msg::PointCloud2> serialization;
+        sensor_msgs::msg::PointCloud2 livox_cloud;
+        rclcpp::SerializedMessage serialized_msg(*bag_message->serialized_data);
+        serialization.deserialize_message(&serialized_msg, &livox_cloud);
+        
+        pcl::PointCloud<pcl::PointXYZI> cloud;
+        pcl::PCLPointCloud2 pcl_pc;
+        pcl_conversions::toPCL(livox_cloud, pcl_pc);
+        pcl::fromPCLPointCloud2(pcl_pc, cloud);
+        for (uint i = 0; i < cloud.size(); ++i) {
+          origin_cloud->points.push_back(cloud.points[i]);
+        }
       }
-    } else {
-      sensor_msgs::PointCloud2 livox_cloud;
-      livox_cloud =
-          *(m.instantiate<sensor_msgs::PointCloud2>()); // message type
-      pcl::PointCloud<pcl::PointXYZI> cloud;
-      pcl::PCLPointCloud2 pcl_pc;
-      pcl_conversions::toPCL(livox_cloud, pcl_pc);
-      pcl::fromPCLPointCloud2(pcl_pc, cloud);
-      for (uint i = 0; i < cloud.size(); ++i) {
-        origin_cloud->points.push_back(cloud.points[i]);
-      }
+      ++cloudCount;
     }
-
-    ++cloudCount;
-    // maxinum msg num 1000
-    // if (cloudCount > 1000) {
-    //   break;
-    // }
-  }
-  std::vector<string> img_topic;
-  img_topic.push_back(image_topic_name_);
-  rosbag::View img_view(bag, rosbag::TopicQuery(img_topic));
-  int cnt = 0;
-  for (const rosbag::MessageInstance &m : img_view) {
-    cnt++;
-    if (cnt == 1) {
-      sensor_msgs::Image image;
-      image = *(m.instantiate<sensor_msgs::Image>()); // message type
+    
+    if (bag_message->topic_name == image_topic_name_) {
+      rclcpp::Serialization<sensor_msgs::msg::Image> serialization;
+      sensor_msgs::msg::Image image;
+      rclcpp::SerializedMessage serialized_msg(*bag_message->serialized_data);
+      serialization.deserialize_message(&serialized_msg, &image);
+      
       cv_bridge::CvImagePtr img_ptr =
           cv_bridge::toCvCopy(image, sensor_msgs::image_encodings::BGR8);
       img_ptr->image.copyTo(rgb_img);
+      break; // Only need the first image
     }
   }
-  ROS_INFO("Sucessfully load Point Cloud and Image");
+  
+  RCLCPP_INFO(node_->get_logger(), "Sucessfully load Point Cloud and Image");
 }
 
 void Calibration::calcDirection(const std::vector<Eigen::Vector2d> &points,
@@ -1409,7 +1425,7 @@ void Calibration::calcDirection(const std::vector<Eigen::Vector2d> &points,
         (points[i] - mean_point) * (points[i] - mean_point).transpose();
     S += s;
   }
-  Eigen::EigenSolver<Eigen::Matrix<double, 2, 2>> es(S);
+  Eigen::EigenSolver<Eigen::Matrix2d> es(S);
   Eigen::MatrixXcd evecs = es.eigenvectors();
   Eigen::MatrixXcd evals = es.eigenvalues();
   Eigen::MatrixXd evalsReal;
